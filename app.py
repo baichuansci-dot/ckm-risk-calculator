@@ -51,7 +51,15 @@ except Exception as e:
     raise
 
 # Load training data for SHAP
-df_train = pd.read_csv(DATA_PATH)
+# Only load columns needed for SHAP background (not full CSV) to save memory
+needed_cols = list(set([
+    'WBC', 'Dyslipidemia', 'HighCholesterol', 'DBP', 'Creatinine', 'Glucose',
+    'Gender', 'TG', 'SBP', 'Age', 'MCV', 'smoking', 'Platelet', 'CI',
+    'UricAcid', 'BUN'
+]))
+available_cols = [c for c in needed_cols if c in pd.read_csv(DATA_PATH, nrows=1).columns]
+df_train = pd.read_csv(DATA_PATH, usecols=available_cols)
+print(f"Loaded {len(df_train)} training samples ({len(available_cols)} columns) for SHAP background")
 
 # Prediction Time Horizon (Months)
 # Set to 120 months (10 years), consistent with external validation follow-up.
@@ -138,19 +146,47 @@ feature_info = {
 }
 
 # Initialize SHAP explainers
-print("Initializing SHAP explainers (this may take a moment)...")
-# Use subset of training data for SHAP background to reduce memory footprint
-# 2000 samples with 50 clusters balances explanation quality and memory (<512MB Render limit)
-N_SHAP_SAMPLES = 2000
-N_SHAP_CLUSTERS = 50
-if len(df_train) > N_SHAP_SAMPLES:
-    df_train_shap = df_train.sample(n=N_SHAP_SAMPLES, random_state=42)
-else:
-    df_train_shap = df_train
-X_all_cause = df_train_shap[all_cause_features]
-X_cardio = df_train_shap[cardiovascular_features]
+print("Initializing SHAP explainers...")
 
-print(f"Using {len(X_all_cause)} training samples for SHAP background data...")
+# Use small subset for SHAP background (memory-constrained Render 512MB environment)
+N_SHAP_BG = 300
+N_SHAP_CLUSTERS = 20
+if len(df_train) > N_SHAP_BG:
+    df_train_bg = df_train.sample(n=N_SHAP_BG, random_state=42)
+else:
+    df_train_bg = df_train
+X_all_cause = df_train_bg[all_cause_features]
+X_cardio = df_train_bg[cardiovascular_features]
+print(f"Using {len(X_all_cause)} samples for SHAP background")
+
+# Free the full training DataFrame to save memory
+del df_train
+
+# Try TreeExplainer for GradientBoosting (100x less memory than KernelExplainer)
+# Fall back to minimal KernelExplainer if scikit-survival model is incompatible
+print("Creating explainer for all-cause model...")
+try:
+    explainer_all_cause = shap.TreeExplainer(
+        model_all_cause,
+        feature_perturbation="interventional"
+    )
+    print("✓ All-cause TreeExplainer ready (low memory)")
+except Exception as e:
+    print(f"TreeExplainer not supported ({e}), using minimal KernelExplainer...")
+    explainer_all_cause = shap.KernelExplainer(
+        predict_all_cause,
+        shap.kmeans(X_all_cause, min(N_SHAP_CLUSTERS, 10))
+    )
+    print("✓ All-cause KernelExplainer ready")
+
+# Use minimal KernelExplainer for RandomSurvivalForest
+print(f"Creating KernelExplainer for cardiovascular model ({N_SHAP_CLUSTERS} clusters)...")
+explainer_cardio = shap.KernelExplainer(
+    predict_cardio,
+    shap.kmeans(X_cardio, N_SHAP_CLUSTERS)
+)
+print(f"✓ Cardio KernelExplainer ready")
+print(f"SHAP initialized successfully")
 
 def predict_all_cause(data):
     """Predict all-cause mortality probability at 10 years as 1 - S(120 months)."""
@@ -352,8 +388,8 @@ def predict():
                                "derived from the 10-year IPCW time-dependent ROC Youden index. "
                                "Risk is calculated as 1 − S(120 months).")
         
-        # Calculate SHAP values (nsamples=500 balances precision with Render 512MB limit)
-        shap_values = explainer.shap_values(input_standardized, nsamples=500)
+        # Calculate SHAP values (minimal nsamples for Render 512MB limit)
+        shap_values = explainer.shap_values(input_standardized, nsamples=200, silent=True)
         
         # Handle list output from explainer
         if isinstance(shap_values, list):
