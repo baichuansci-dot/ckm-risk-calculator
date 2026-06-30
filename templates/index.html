@@ -1,0 +1,487 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Mortality Prediction in CKM Syndrome Stages 0–3</title>
+    <style>
+        :root {
+            --primary-color: #4a90e2;
+            --sidebar-bg: #f5f7fa;
+            --sidebar-width: 300px;
+            --danger-color: #ff4d4f;
+        }
+        
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+            font-family: 'Times New Roman', Times, serif;
+        }
+        
+        body {
+            background-color: #fff;
+            color: #333;
+            display: flex;
+            min-height: 100vh;
+        }
+        
+        /* Sidebar */
+        .sidebar {
+            width: var(--sidebar-width);
+            background-color: #fff;
+            padding: 20px;
+            border-right: 1px solid #eee;
+            flex-shrink: 0;
+        }
+        
+        .model-info-box {
+            background-color: #e6f7ff;
+            border-radius: 8px;
+            padding: 20px;
+            margin-bottom: 30px;
+        }
+        
+        .model-info-title {
+            font-weight: bold;
+            font-size: 1.1em;
+            margin-bottom: 15px;
+            color: #333;
+        }
+        
+        .info-list {
+            list-style: none;
+        }
+        
+        .info-list li {
+            margin-bottom: 10px;
+            font-size: 0.9em;
+            line-height: 1.5;
+            position: relative;
+            padding-left: 15px;
+        }
+        
+        .info-list li::before {
+            content: "•";
+            color: #1890ff;
+            position: absolute;
+            left: 0;
+            font-weight: bold;
+        }
+        
+        .feature-desc-title {
+            font-weight: bold;
+            font-size: 1.1em;
+            margin-bottom: 15px;
+            margin-top: 30px;
+        }
+        
+        .feature-list {
+            list-style: none;
+            font-size: 0.85em;
+            color: #666;
+        }
+        
+        .feature-list li {
+            margin-bottom: 8px;
+            padding-left: 15px;
+            position: relative;
+        }
+        
+        .feature-list li::before {
+            content: "•";
+            position: absolute;
+            left: 0;
+        }
+
+        /* Main Content */
+        .main-content {
+            flex-grow: 1;
+            padding: 40px;
+            overflow-y: auto;
+        }
+        
+        h1 {
+            font-size: 2em;
+            margin-bottom: 10px;
+            color: #333;
+        }
+        
+        .subtitle {
+            color: #666;
+            margin-bottom: 40px;
+        }
+        
+        /* Form Grid */
+        .form-grid {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 20px;
+            margin-bottom: 30px;
+        }
+        
+        .form-group {
+            margin-bottom: 15px;
+        }
+        
+        .form-group label {
+            display: block;
+            font-size: 0.9em;
+            color: #666;
+            margin-bottom: 8px;
+            font-weight: 500;
+        }
+        
+        .input-wrapper {
+            display: flex;
+            align-items: center;
+            background: #f5f7fa;
+            border-radius: 4px;
+            padding: 5px;
+        }
+        
+        .input-wrapper input, .input-wrapper select {
+            border: none;
+            background: transparent;
+            flex-grow: 1;
+            padding: 8px;
+            text-align: center;
+            font-size: 1em;
+            width: 100%;
+        }
+        
+        .input-wrapper input:focus, .input-wrapper select:focus {
+            outline: none;
+        }
+        
+        .stepper-btn {
+            background: none;
+            border: none;
+            color: #333;
+            font-weight: bold;
+            cursor: pointer;
+            padding: 0 10px;
+            font-size: 1.2em;
+            user-select: none;
+        }
+        
+        .stepper-btn:hover {
+            color: var(--primary-color);
+        }
+
+        /* Predict Button */
+        .predict-btn {
+            background: white;
+            color: var(--danger-color);
+            border: 1px solid var(--danger-color);
+            padding: 10px 30px;
+            font-size: 1em;
+            border-radius: 4px;
+            cursor: pointer;
+            transition: all 0.3s;
+            font-weight: 500;
+        }
+        
+        .predict-btn:hover {
+            background: var(--danger-color);
+            color: white;
+        }
+        
+        /* Results */
+        .results-section {
+            margin-top: 50px;
+            border-top: 1px solid #eee;
+            padding-top: 30px;
+            display: none;
+        }
+        
+        .results-section.show {
+            display: block;
+        }
+        
+        .result-title {
+            font-size: 1.5em;
+            font-weight: bold;
+            margin-bottom: 20px;
+        }
+        
+        .risk-percentage {
+            font-size: 3.5em;
+            font-weight: 300;
+            color: #333;
+            margin-bottom: 20px;
+        }
+        
+        .risk-level-box {
+            background-color: #e6f7ff;
+            color: #0050b3;
+            padding: 15px;
+            border-radius: 4px;
+            display: inline-block;
+            width: 100%;
+            font-weight: 500;
+        }
+        
+        .model-interpretation {
+            margin-top: 40px;
+        }
+        
+        .model-interpretation img {
+            max-width: 100%;
+            margin-top: 20px;
+        }
+
+        /* Loading */
+        .loading {
+            display: none;
+            text-align: center;
+            margin: 20px 0;
+        }
+        .loading.show { display: block; }
+        
+        /* Responsive */
+        @media (max-width: 1024px) {
+            .form-grid { grid-template-columns: repeat(2, 1fr); }
+        }
+        @media (max-width: 768px) {
+            body { flex-direction: column; }
+            .sidebar { width: 100%; border-right: none; border-bottom: 1px solid #eee; }
+            .form-grid { grid-template-columns: 1fr; }
+        }
+    </style>
+</head>
+<body>
+    <!-- Sidebar -->
+    <div class="sidebar">
+        <div class="model-info-box">
+            <div class="model-info-title">Model Information</div>
+            <ul class="info-list">
+                <li><strong>Model Type:</strong><br>Gradient Boosting Survival / Random Survival Forest</li>
+                <li><strong>Training Data:</strong><br>Clinical Data</li>
+                <li><strong>Target Variable:</strong><br>All-cause / Cardiovascular Mortality</li>
+                <li><strong>Population:</strong><br>Cardiovascular-Kidney-Metabolic Syndrome Stages 0–3</li>
+            </ul>
+        </div>
+        
+        <div class="feature-desc-title">Feature Description</div>
+        <ul class="feature-list" id="featureDescriptionList">
+            <!-- Populated by JS -->
+        </ul>
+    </div>
+
+    <!-- Main Content -->
+    <div class="main-content">
+        <h1>Mortality Prediction in Individuals with Cardiovascular-Kidney-Metabolic Syndrome Stages 0–3</h1>
+        <p class="subtitle">Please input patient's clinical indicators:</p>
+        
+        <div style="margin-bottom: 20px;">
+             <label for="modelType" style="font-weight: bold; margin-right: 10px;">Prediction Target:</label>
+             <select id="modelType" onchange="updateFormFields()" style="padding: 5px;">
+                <option value="all_cause">10-Year All-cause Mortality Risk</option>
+                <option value="cardiovascular">10-Year Cardiovascular Mortality Risk</option>
+             </select>
+        </div>
+
+        <form id="calculatorForm">
+            <div class="form-grid" id="formFields">
+                <!-- Fields generated by JS -->
+            </div>
+            
+            <button type="submit" class="predict-btn">Predict</button>
+        </form>
+
+        <div class="loading" id="loading">
+            <p>Calculating...</p>
+        </div>
+
+        <div class="results-section" id="results">
+            <div class="result-title">Prediction Results</div>
+            
+            <div style="margin-bottom: 10px; color: #666;" id="resultLabel">Risk of Mortality</div>
+            <div class="risk-percentage" id="predictionValue">--%</div>
+            
+            <div class="risk-level-box" id="riskLevelBox">
+                Risk Level: --
+            </div>
+            
+            <div class="model-interpretation">
+                <h3 style="font-size: 1.5em; margin-bottom: 20px;">Model Interpretation</h3>
+                <img id="shapPlot" src="" alt="SHAP Explanation">
+                <p style="font-size: 0.8em; color: #999; margin-top: 10px; text-align: center;">
+                    * SHAP waterfall plot showing feature contributions to the predicted 10-year mortality risk.
+                </p>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const allCauseFeatures = {{ all_cause_features | tojson }};
+        const cardiovascularFeatures = {{ cardiovascular_features | tojson }};
+        const featureMapping = {{ feature_mapping | tojson }};
+        const featureInfo = {{ feature_info | tojson }};
+        
+        function updateFormFields() {
+            const modelType = document.getElementById('modelType').value;
+            const features = modelType === 'all_cause' ? allCauseFeatures : cardiovascularFeatures;
+            const formFields = document.getElementById('formFields');
+            const featureDescList = document.getElementById('featureDescriptionList');
+            
+            formFields.innerHTML = '';
+            featureDescList.innerHTML = '';
+            
+            features.forEach(feature => {
+                const info = featureInfo[feature];
+                const labelText = featureMapping[feature] || feature;
+                
+                // Add to sidebar description
+                // Clean name for sidebar: remove units in parentheses
+                const sidebarName = labelText.replace(/\s*\(.*?\)\s*/g, '').trim();
+                
+                const li = document.createElement('li');
+                if (info.type === 'select') {
+                    // Clean option labels: remove text in parentheses
+                    const options = info.options.map(o => o.label.replace(/\s*\(.*?\)\s*/g, '').trim()).join(', ');
+                    li.textContent = `${sidebarName}: ${options}`;
+                } else {
+                    const unitStr = info.unit ? ` (${info.unit})` : '';
+                    li.textContent = `${sidebarName}: ${info.min}-${info.max}${unitStr}`;
+                }
+                featureDescList.appendChild(li);
+
+                // Create Input Group
+                const div = document.createElement('div');
+                div.className = 'form-group';
+                
+                const label = document.createElement('label');
+                label.textContent = labelText;
+                div.appendChild(label);
+                
+                const wrapper = document.createElement('div');
+                wrapper.className = 'input-wrapper';
+                
+                if (info.type === 'select') {
+                    const select = document.createElement('select');
+                    select.id = feature;
+                    select.name = feature;
+                    
+                    info.options.forEach(option => {
+                        const opt = document.createElement('option');
+                        opt.value = option.value;
+                        opt.textContent = option.label;
+                        select.appendChild(opt);
+                    });
+                    wrapper.appendChild(select);
+                } else {
+                    // Stepper for numbers
+                    const btnMinus = document.createElement('button');
+                    btnMinus.type = 'button';
+                    btnMinus.className = 'stepper-btn';
+                    btnMinus.textContent = '-';
+                    btnMinus.onclick = () => stepValue(feature, -1);
+                    
+                    const input = document.createElement('input');
+                    input.type = 'number';
+                    input.id = feature;
+                    input.name = feature;
+                    input.step = info.step;
+                    input.min = info.min;
+                    input.max = info.max;
+                    // Set default value to mean of range or min
+                    input.value = (info.min + (info.max - info.min)/2).toFixed(info.step < 1 ? 1 : 0);
+                    
+                    const btnPlus = document.createElement('button');
+                    btnPlus.type = 'button';
+                    btnPlus.className = 'stepper-btn';
+                    btnPlus.textContent = '+';
+                    btnPlus.onclick = () => stepValue(feature, 1);
+                    
+                    wrapper.appendChild(btnMinus);
+                    wrapper.appendChild(input);
+                    wrapper.appendChild(btnPlus);
+                }
+                
+                div.appendChild(wrapper);
+                formFields.appendChild(div);
+            });
+            
+            // Hide results
+            document.getElementById('results').classList.remove('show');
+        }
+        
+        function stepValue(id, direction) {
+            const input = document.getElementById(id);
+            const info = featureInfo[id];
+            let val = parseFloat(input.value) || info.min;
+            val += direction * info.step;
+            
+            // Clamp
+            if (val < info.min) val = info.min;
+            if (val > info.max) val = info.max;
+            
+            // Format
+            if (info.step < 1) {
+                input.value = val.toFixed(1);
+            } else {
+                input.value = Math.round(val);
+            }
+        }
+        
+        document.getElementById('calculatorForm').addEventListener('submit', async function(e) {
+            e.preventDefault();
+            
+            const modelType = document.getElementById('modelType').value;
+            const features = modelType === 'all_cause' ? allCauseFeatures : cardiovascularFeatures;
+            
+            const formData = { model_type: modelType };
+            features.forEach(f => {
+                formData[f] = document.getElementById(f).value;
+            });
+            
+            document.getElementById('loading').classList.add('show');
+            document.getElementById('results').classList.remove('show');
+            
+            try {
+                const response = await fetch('/predict', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(formData)
+                });
+                
+                const result = await response.json();
+                
+                if (result.success) {
+                    // Update Result
+                    const prob = result.prediction * 100;
+                    document.getElementById('predictionValue').textContent = prob.toFixed(1) + '%';
+                    document.getElementById('resultLabel').textContent = modelType === 'all_cause' ? '10-Year Risk of All-cause Mortality' : '10-Year Risk of Cardiovascular Mortality';
+                    
+                    // Risk Level Logic is returned by the backend to avoid threshold mismatch.
+                    const riskLevel = result.risk_level || 'Low / Non-high Risk';
+                    const riskColor = result.risk_color === 'red' ? '#f5222d' : '#52c41a';
+                    const bg = result.risk_color === 'red' ? '#fff1f0' : '#f6ffed';
+                    const thresholdText = result.threshold_used !== undefined ? ` (cutoff: ${(result.threshold_used * 100).toFixed(2)}%)` : '';
+
+                    const riskBox = document.getElementById('riskLevelBox');
+                    riskBox.textContent = 'Risk Level: ' + riskLevel + thresholdText;
+                    riskBox.style.color = riskColor;
+                    riskBox.style.backgroundColor = bg;
+                    
+                    // Image
+                    document.getElementById('shapPlot').src = 'data:image/png;base64,' + result.shap_plot;
+                    
+                    document.getElementById('results').classList.add('show');
+                } else {
+                    alert('Error: ' + result.error);
+                }
+            } catch (err) {
+                alert('Error: ' + err.message);
+            } finally {
+                document.getElementById('loading').classList.remove('show');
+            }
+        });
+        
+        // Init
+        updateFormFields();
+    </script>
+</body>
+</html>

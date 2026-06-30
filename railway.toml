@@ -1,0 +1,5 @@
+[build]
+# Using Dockerfile for reliable system dependency installation
+
+[deploy]
+startCommand = "gunicorn -c gunicorn_config.py app:app"
