@@ -139,9 +139,16 @@ feature_info = {
 
 # Initialize SHAP explainers
 print("Initializing SHAP explainers (this may take a moment)...")
-# Use ALL training data (approximately 7000 samples) for SHAP background
-X_all_cause = df_train[all_cause_features]
-X_cardio = df_train[cardiovascular_features]
+# Use subset of training data for SHAP background to reduce memory footprint
+# 2000 samples with 50 clusters balances explanation quality and memory (<512MB Render limit)
+N_SHAP_SAMPLES = 2000
+N_SHAP_CLUSTERS = 50
+if len(df_train) > N_SHAP_SAMPLES:
+    df_train_shap = df_train.sample(n=N_SHAP_SAMPLES, random_state=42)
+else:
+    df_train_shap = df_train
+X_all_cause = df_train_shap[all_cause_features]
+X_cardio = df_train_shap[cardiovascular_features]
 
 print(f"Using {len(X_all_cause)} training samples for SHAP background data...")
 
@@ -208,12 +215,12 @@ print(f"  All-cause: Low/Non-high < {thresholds['all_cause']['high']:.2%} | High
 print(f"  Cardio:    Low/Non-high < {thresholds['cardio']['high']:.2%} | High >= {thresholds['cardio']['high']:.2%}")
 
 # Create SHAP explainers
-# Cluster all training data into representative points for computational efficiency
-# Using 100 cluster centers to balance accuracy and computation time (consistent with paper methodology)
-print("Clustering training data for SHAP (this may take 1-2 minutes)...")
-explainer_all_cause = shap.KernelExplainer(predict_all_cause, shap.kmeans(X_all_cause, 100))
-explainer_cardio = shap.KernelExplainer(predict_cardio, shap.kmeans(X_cardio, 100))
-print(f"SHAP explainers initialized: {len(X_all_cause)} training samples -> 100 cluster centers")
+# Cluster training data into representative points for computational efficiency
+# Using 50 cluster centers to stay within Render 512MB memory limit
+print(f"Clustering training data for SHAP into {N_SHAP_CLUSTERS} centers...")
+explainer_all_cause = shap.KernelExplainer(predict_all_cause, shap.kmeans(X_all_cause, N_SHAP_CLUSTERS))
+explainer_cardio = shap.KernelExplainer(predict_cardio, shap.kmeans(X_cardio, N_SHAP_CLUSTERS))
+print(f"SHAP explainers initialized: {len(X_all_cause)} training samples -> {N_SHAP_CLUSTERS} cluster centers")
 
 @app.route('/')
 def index():
@@ -345,9 +352,8 @@ def predict():
                                "derived from the 10-year IPCW time-dependent ROC Youden index. "
                                "Risk is calculated as 1 − S(120 months).")
         
-        # Calculate SHAP values with higher accuracy
-        # nsamples=1000 ensures precision as per methodology
-        shap_values = explainer.shap_values(input_standardized, nsamples=1000)
+        # Calculate SHAP values (nsamples=500 balances precision with Render 512MB limit)
+        shap_values = explainer.shap_values(input_standardized, nsamples=500)
         
         # Handle list output from explainer
         if isinstance(shap_values, list):
@@ -378,7 +384,7 @@ def predict():
         
         # Convert to base64 image
         buffer = BytesIO()
-        plt.savefig(buffer, format='png', dpi=1200, bbox_inches='tight')
+        plt.savefig(buffer, format='png', dpi=150, bbox_inches='tight')
         buffer.seek(0)
         image_base64 = base64.b64encode(buffer.read()).decode()
         plt.close()
