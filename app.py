@@ -2,7 +2,8 @@
 # -*- coding: utf-8 -*-
 """
 Web-based Risk Calculator using Flask
-Supports both All-cause and Cardiovascular Mortality Prediction
+10-Year All-cause and Cardiovascular Mortality Prediction in CKM Syndrome Stages 0-3
+Memory-optimized for Render 512MB free tier
 """
 
 from flask import Flask, render_template, request, jsonify
@@ -17,78 +18,89 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
-# Set font to Times New Roman globally for matplotlib
 plt.rcParams['font.family'] = 'Times New Roman'
 plt.rcParams['font.sans-serif'] = ['Times New Roman']
-plt.rcParams['mathtext.fontset'] = 'stix'  # Use STIX font for math text which is similar to Times New Roman
+plt.rcParams['mathtext.fontset'] = 'stix'
 plt.rcParams['mathtext.rm'] = 'Times New Roman'
 plt.rcParams['mathtext.it'] = 'Times New Roman:italic'
 plt.rcParams['mathtext.bf'] = 'Times New Roman:bold'
+plt.rcParams['figure.max_open_warning'] = 0
 
 app = Flask(__name__)
 
-# Configuration
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 MODEL_DIR = os.path.join(BASE_DIR, "models")
 SCALER_PATH = os.path.join(BASE_DIR, "scaler.pkl")
 DATA_PATH = os.path.join(BASE_DIR, "训练集_标准化后.csv")
 
-# Load models and scaler
-print("Loading models and scaler...")
-try:
-    scaler = joblib.load(SCALER_PATH)
-    print(f"✓ Scaler loaded successfully")
-    model_all_cause = joblib.load(os.path.join(MODEL_DIR, "CI_all_cause_death_GradientBoostingSurvival.pkl"))
-    print(f"✓ All-cause model loaded successfully")
-    model_cardiovascular = joblib.load(os.path.join(MODEL_DIR, "CI_cardiovascular_death_RandomSurvivalForest.pkl"))
-    print(f"✓ Cardiovascular model loaded successfully")
-except Exception as e:
-    print(f"✗ ERROR loading models: {e}")
-    print(f"  Python version: {os.sys.version}")
-    print(f"  joblib version: {joblib.__version__}")
-    import sklearn
-    print(f"  scikit-learn version: {sklearn.__version__}")
-    raise
+# ------------------------------------------------------------
+# 1. Load only essentials at startup (scaler + models ONLY)
+# ------------------------------------------------------------
+print("=" * 50)
+print("Starting CKM Risk Calculator (memory-optimized)")
+print("=" * 50)
 
-# Load training data for SHAP
-# Only load columns needed for SHAP background (not full CSV) to save memory
-needed_cols = list(set([
+print("[1/4] Loading scaler...")
+scaler = joblib.load(SCALER_PATH)
+print(f"  ✓ Scaler loaded")
+
+print("[2/4] Loading all-cause model...")
+model_all_cause = joblib.load(os.path.join(MODEL_DIR, "CI_all_cause_death_GradientBoostingSurvival.pkl"))
+print(f"  ✓ All-cause model loaded")
+
+print("[3/4] Loading cardiovascular model...")
+model_cardiovascular = joblib.load(os.path.join(MODEL_DIR, "CI_cardiovascular_death_RandomSurvivalForest.pkl"))
+print(f"  ✓ Cardiovascular model loaded")
+
+# ------------------------------------------------------------
+# 2. Load minimal training data (for input clipping only)
+# ------------------------------------------------------------
+print("[4/4] Loading reference data...")
+needed_cols = [
     'WBC', 'Dyslipidemia', 'HighCholesterol', 'DBP', 'Creatinine', 'Glucose',
     'Gender', 'TG', 'SBP', 'Age', 'MCV', 'smoking', 'Platelet', 'CI',
     'UricAcid', 'BUN'
-]))
+]
 available_cols = [c for c in needed_cols if c in pd.read_csv(DATA_PATH, nrows=1).columns]
-df_train = pd.read_csv(DATA_PATH, usecols=available_cols)
-print(f"Loaded {len(df_train)} training samples ({len(available_cols)} columns) for SHAP background")
+df_train_full = pd.read_csv(DATA_PATH, usecols=available_cols)
+if 'HighCholesterol' in df_train_full.columns:
+    df_train_full = df_train_full.rename(columns={'HighCholesterol': 'Dyslipidemia'})
 
-# Prediction Time Horizon (Months)
-# Set to 120 months (10 years), consistent with external validation follow-up.
+# Pre-compute clipping bounds (0.5-99.5 percentile) — stored as small arrays
+clip_bounds = {}
+for feat_set_name, feat_list in [
+    ('all_cause', ['WBC', 'Dyslipidemia', 'DBP', 'Creatinine', 'Glucose',
+                   'Gender', 'TG', 'SBP', 'Age', 'MCV', 'smoking', 'Platelet', 'CI']),
+    ('cardio', ['WBC', 'DBP', 'UricAcid', 'SBP', 'BUN', 'Age', 'CI'])
+]:
+    cols = [c for c in feat_list if c in df_train_full.columns]
+    sub = df_train_full[cols]
+    clip_bounds[feat_set_name] = {
+        'min': sub.quantile(0.005).values,
+        'max': sub.quantile(0.995).values,
+        'cols': cols
+    }
+print(f"  ✓ Clipping bounds computed for {len(available_cols)} features")
+
+# ------------------------------------------------------------
+# 3. Constants
+# ------------------------------------------------------------
 TIME_HORIZON = 120.0
 
-# Get all feature names that scaler expects
 if hasattr(scaler, 'feature_names_in_'):
     scaler_features = list(scaler.feature_names_in_)
 else:
-    scaler_features = list(df_train.columns)
+    scaler_features = list(df_train_full.columns)
 
-# Rename HighCholesterol to Dyslipidemia for display purposes
-if 'HighCholesterol' in df_train.columns:
-    df_train = df_train.rename(columns={'HighCholesterol': 'Dyslipidemia'})
-
-# Feature definitions
 all_cause_features = [
-    'WBC', 'Dyslipidemia', 'DBP', 'Creatinine', 'Glucose', 
+    'WBC', 'Dyslipidemia', 'DBP', 'Creatinine', 'Glucose',
     'Gender', 'TG', 'SBP', 'Age', 'MCV', 'smoking', 'Platelet', 'CI'
 ]
-
 cardiovascular_features = [
     'WBC', 'DBP', 'UricAcid', 'SBP', 'BUN', 'Age', 'CI'
 ]
-
-# Define categorical features (not standardized)
 categorical_features = ['Gender', 'smoking', 'HighCholesterol', 'Dyslipidemia']
 
-# Feature name mapping (English display names)
 feature_mapping = {
     'WBC': 'White Blood Cell (10^9/L)',
     'Dyslipidemia': 'Dyslipidemia',
@@ -107,37 +119,26 @@ feature_mapping = {
     'BUN': 'Blood Urea Nitrogen (mg/dL)'
 }
 
-# Feature ranges and units
 feature_info = {
     'WBC': {'min': 1.0, 'max': 30.0, 'step': 0.1, 'unit': '10^9/L', 'type': 'number'},
     'Dyslipidemia': {
-        'min': 1, 'max': 2, 'step': 1, 'unit': '', 'type': 'select', 
-        'options': [
-            {'value': 1, 'label': 'Yes (have dyslipidemia)'}, 
-            {'value': 2, 'label': 'No (no dyslipidemia)'}
-        ]
+        'min': 1, 'max': 2, 'step': 1, 'unit': '', 'type': 'select',
+        'options': [{'value': 1, 'label': 'Yes (have dyslipidemia)'}, {'value': 2, 'label': 'No (no dyslipidemia)'}]
     },
     'DBP': {'min': 40, 'max': 120, 'step': 1, 'unit': 'mmHg', 'type': 'number'},
     'Creatinine': {'min': 0.1, 'max': 15.0, 'step': 0.1, 'unit': 'mg/dL', 'type': 'number'},
     'Glucose': {'min': 50, 'max': 500, 'step': 1, 'unit': 'mg/dL', 'type': 'number'},
     'Gender': {
-        'min': 1, 'max': 2, 'step': 1, 'unit': '', 'type': 'select', 
-        'options': [
-            {'value': 1, 'label': 'Male'}, 
-            {'value': 2, 'label': 'Female'}
-        ]
+        'min': 1, 'max': 2, 'step': 1, 'unit': '', 'type': 'select',
+        'options': [{'value': 1, 'label': 'Male'}, {'value': 2, 'label': 'Female'}]
     },
     'TG': {'min': 20, 'max': 1000, 'step': 1, 'unit': 'mg/dL', 'type': 'number'},
     'SBP': {'min': 80, 'max': 220, 'step': 1, 'unit': 'mmHg', 'type': 'number'},
     'Age': {'min': 18, 'max': 100, 'step': 1, 'unit': 'years', 'type': 'number'},
     'MCV': {'min': 60, 'max': 120, 'step': 0.1, 'unit': 'fL', 'type': 'number'},
     'smoking': {
-        'min': 0, 'max': 2, 'step': 1, 'unit': '', 'type': 'select', 
-        'options': [
-            {'value': 0, 'label': 'Never'}, 
-            {'value': 1, 'label': 'Former'}, 
-            {'value': 2, 'label': 'Current'}
-        ]
+        'min': 0, 'max': 2, 'step': 1, 'unit': '', 'type': 'select',
+        'options': [{'value': 0, 'label': 'Never'}, {'value': 1, 'label': 'Former'}, {'value': 2, 'label': 'Current'}]
     },
     'Platelet': {'min': 10, 'max': 1000, 'step': 1, 'unit': '10^9/L', 'type': 'number'},
     'CI': {'min': 1.0, 'max': 1.8, 'step': 0.01, 'unit': '', 'type': 'number'},
@@ -145,226 +146,157 @@ feature_info = {
     'BUN': {'min': 1.0, 'max': 150, 'step': 0.1, 'unit': 'mg/dL', 'type': 'number'}
 }
 
-# Initialize SHAP explainers
-print("Initializing SHAP explainers...")
-
-# Use small subset for SHAP background (memory-constrained Render 512MB environment)
-N_SHAP_BG = 300
-N_SHAP_CLUSTERS = 20
-if len(df_train) > N_SHAP_BG:
-    df_train_bg = df_train.sample(n=N_SHAP_BG, random_state=42)
-else:
-    df_train_bg = df_train
-X_all_cause = df_train_bg[all_cause_features]
-X_cardio = df_train_bg[cardiovascular_features]
-print(f"Using {len(X_all_cause)} samples for SHAP background")
-
-# Free the full training DataFrame to save memory
-del df_train
-
-# Try TreeExplainer for GradientBoosting (100x less memory than KernelExplainer)
-# Fall back to minimal KernelExplainer if scikit-survival model is incompatible
-print("Creating explainer for all-cause model...")
-try:
-    explainer_all_cause = shap.TreeExplainer(
-        model_all_cause,
-        feature_perturbation="interventional"
-    )
-    print("✓ All-cause TreeExplainer ready (low memory)")
-except Exception as e:
-    print(f"TreeExplainer not supported ({e}), using minimal KernelExplainer...")
-    explainer_all_cause = shap.KernelExplainer(
-        predict_all_cause,
-        shap.kmeans(X_all_cause, min(N_SHAP_CLUSTERS, 10))
-    )
-    print("✓ All-cause KernelExplainer ready")
-
-# Use minimal KernelExplainer for RandomSurvivalForest
-print(f"Creating KernelExplainer for cardiovascular model ({N_SHAP_CLUSTERS} clusters)...")
-explainer_cardio = shap.KernelExplainer(
-    predict_cardio,
-    shap.kmeans(X_cardio, N_SHAP_CLUSTERS)
-)
-print(f"✓ Cardio KernelExplainer ready")
-print(f"SHAP initialized successfully")
-
+# ------------------------------------------------------------
+# 4. Prediction functions
+# ------------------------------------------------------------
 def predict_all_cause(data):
-    """Predict all-cause mortality probability at 10 years as 1 - S(120 months)."""
-    if not hasattr(model_all_cause, "predict_survival_function"):
-        raise RuntimeError("All-cause model must provide predict_survival_function for 10-year probability estimation.")
-
     surv_funcs = model_all_cause.predict_survival_function(data)
-    death_probs = []
-    for surv_func in surv_funcs:
-        # 10-year mortality risk = 1 - survival probability at 120 months
-        surv_prob = surv_func(TIME_HORIZON)
-        death_prob = 1.0 - surv_prob
-        death_probs.append(death_prob)
-    return np.array(death_probs)
+    return np.array([1.0 - sf(TIME_HORIZON) for sf in surv_funcs])
 
 def predict_cardio(data):
-    """Predict cardiovascular mortality probability at 10 years as 1 - S(120 months)."""
-    if not hasattr(model_cardiovascular, "predict_survival_function"):
-        raise RuntimeError("Cardiovascular model must provide predict_survival_function for 10-year probability estimation.")
-
     surv_funcs = model_cardiovascular.predict_survival_function(data)
-    death_probs = []
-    for surv_func in surv_funcs:
-        # 10-year mortality risk = 1 - survival probability at 120 months
-        surv_prob = surv_func(TIME_HORIZON)
-        death_prob = 1.0 - surv_prob
-        death_probs.append(death_prob)
-    return np.array(death_probs)
+    return np.array([1.0 - sf(TIME_HORIZON) for sf in surv_funcs])
 
-# Calculate Risk Thresholds based on IPCW time-dependent ROC Youden Index (10-Year)
-# Derived from risk_thresholds_10_year_Youden_IPCW.csv in this package.
-print("Setting risk thresholds based on 10-Year IPCW time-dependent ROC Youden Index...")
+# ------------------------------------------------------------
+# 5. Risk thresholds
+# ------------------------------------------------------------
 THRESHOLD_PATH = os.path.join(BASE_DIR, "risk_thresholds_10_year_Youden_IPCW.csv")
+_fallback = {
+    'all_cause': {'high': 0.07746522038517001},
+    'cardio': {'high': 0.05471649432917636}
+}
+thresholds = dict(_fallback)
+if os.path.exists(THRESHOLD_PATH):
+    tdf = pd.read_csv(THRESHOLD_PATH)
+    for _, row in tdf.iterrows():
+        thresholds[row['outcome']] = {'high': float(row['threshold_ipcw'])}
+print(f"  ✓ Thresholds: All-cause≥{thresholds['all_cause']['high']:.1%}, Cardio≥{thresholds['cardio']['high']:.1%}")
 
-def load_risk_thresholds():
-    """Load high-risk thresholds derived from 10-year IPCW time-dependent ROC Youden index."""
-    fallback_thresholds = {
-        # Training-set derivation cutoffs. The test-set own optimum is reported
-        # only as a validation contrast and should not drive web stratification.
-        'all_cause': {'high': 0.07746522038517001},
-        'cardio': {'high': 0.05471649432917636}
-    }
-    if not os.path.exists(THRESHOLD_PATH):
-        print(f"Warning: {THRESHOLD_PATH} not found; using embedded IPCW Youden thresholds.")
-        return fallback_thresholds
+# ------------------------------------------------------------
+# 6. SHAP explainers — created LAZILY on first prediction request
+#    (not at startup! avoids OOM during deployment)
+# ------------------------------------------------------------
+_explainers = {}       # cached explainers: {'all_cause': ..., 'cardio': ...}
+_explainer_lock = {}   # prevents race conditions
 
-    threshold_df = pd.read_csv(THRESHOLD_PATH)
-    loaded = {}
-    for _, row in threshold_df.iterrows():
-        if row['outcome'] == 'all_cause':
-            loaded['all_cause'] = {'high': float(row['threshold_ipcw'])}
-        elif row['outcome'] == 'cardiovascular':
-            loaded['cardio'] = {'high': float(row['threshold_ipcw'])}
+def _get_explainer(model_type):
+    """Create (or return cached) SHAP explainer for the given model type.
 
-    for key, value in fallback_thresholds.items():
-        loaded.setdefault(key, value)
-    return loaded
+    Created lazily on first prediction to keep startup memory minimal.
+    TreeExplainer is used for the GradientBoosting model (no background
+    data needed, very memory efficient). KernelExplainer with minimal
+    settings (50 background, 10 clusters) is used for RandomSurvivalForest.
+    """
+    if model_type in _explainers:
+        return _explainers[model_type]
 
-thresholds = load_risk_thresholds()
-print(f"Risk Thresholds (10-Year IPCW Youden):")
-print(f"  All-cause: Low/Non-high < {thresholds['all_cause']['high']:.2%} | High >= {thresholds['all_cause']['high']:.2%}")
-print(f"  Cardio:    Low/Non-high < {thresholds['cardio']['high']:.2%} | High >= {thresholds['cardio']['high']:.2%}")
+    print(f"[SHAP] Creating explainer for {model_type} (first request)...")
 
-# Create SHAP explainers
-# Cluster training data into representative points for computational efficiency
-# Using 50 cluster centers to stay within Render 512MB memory limit
-print(f"Clustering training data for SHAP into {N_SHAP_CLUSTERS} centers...")
-explainer_all_cause = shap.KernelExplainer(predict_all_cause, shap.kmeans(X_all_cause, N_SHAP_CLUSTERS))
-explainer_cardio = shap.KernelExplainer(predict_cardio, shap.kmeans(X_cardio, N_SHAP_CLUSTERS))
-print(f"SHAP explainers initialized: {len(X_all_cause)} training samples -> {N_SHAP_CLUSTERS} cluster centers")
+    # Tiny background sample for KernelExplainer (if needed)
+    bg_n = 50
+    bg_df = df_train_full.sample(n=min(bg_n, len(df_train_full)), random_state=42)
 
+    if model_type == 'all_cause':
+        try:
+            expl = shap.TreeExplainer(model_all_cause, feature_perturbation="interventional")
+            print(f"  ✓ All-cause TreeExplainer ready")
+        except Exception:
+            print(f"  TreeExplainer failed, using KernelExplainer...")
+            X = bg_df[[c for c in all_cause_features if c in bg_df.columns]]
+            expl = shap.KernelExplainer(predict_all_cause, shap.kmeans(X, 10))
+            print(f"  ✓ All-cause KernelExplainer ready")
+    else:
+        X = bg_df[[c for c in cardiovascular_features if c in bg_df.columns]]
+        expl = shap.KernelExplainer(predict_cardio, shap.kmeans(X, 10))
+        print(f"  ✓ Cardio KernelExplainer ready")
+
+    _explainers[model_type] = expl
+    return expl
+
+# ------------------------------------------------------------
+# 7. Routes
+# ------------------------------------------------------------
 @app.route('/')
 def index():
-    """Main page"""
-    return render_template('index.html', 
-                         all_cause_features=all_cause_features,
-                         cardiovascular_features=cardiovascular_features,
-                         feature_mapping=feature_mapping,
-                         feature_info=feature_info)
+    return render_template('index.html',
+                           all_cause_features=all_cause_features,
+                           cardiovascular_features=cardiovascular_features,
+                           feature_mapping=feature_mapping,
+                           feature_info=feature_info)
+
 
 @app.route('/predict', methods=['POST'])
 def predict():
-    """Handle prediction request"""
     try:
         data = request.json
         model_type = data.get('model_type', 'all_cause')
-        
-        # Select model and features
+
         if model_type == 'all_cause':
             features = all_cause_features
-            explainer = explainer_all_cause
             predict_fn = predict_all_cause
+            feat_set_key = 'all_cause'
         else:
             features = cardiovascular_features
-            explainer = explainer_cardio
             predict_fn = predict_cardio
-        
-        # Extract input values
-        input_values = []
-        for feat in features:
-            value = float(data.get(feat, 0))
-            input_values.append(value)
-        
-        # Create DataFrame with original values
+            feat_set_key = 'cardio'
+
+        explainer = _get_explainer(model_type)
+
+        # Build input DataFrame
+        input_values = [float(data.get(f, 0)) for f in features]
         input_df_original = pd.DataFrame([input_values], columns=features)
-        
-        # Map Dyslipidemia back to HighCholesterol for model compatibility
+
         input_df_for_model = input_df_original.copy()
         if 'Dyslipidemia' in input_df_for_model.columns:
             input_df_for_model = input_df_for_model.rename(columns={'Dyslipidemia': 'HighCholesterol'})
-        
-        # Separate categorical and continuous features
+
         model_features = list(input_df_for_model.columns)
-        continuous_features_in_model = [f for f in model_features if f not in categorical_features]
-        
-        # Create full feature DataFrame for scaler
+        continuous_feats = [f for f in model_features if f not in categorical_features]
+
+        # Standardize
         input_full = pd.DataFrame(0.0, index=[0], columns=scaler_features)
-        
-        # Fill in continuous features
-        for col in continuous_features_in_model:
+        for col in continuous_feats:
             if col in scaler_features:
                 input_full[col] = input_df_for_model[col].values[0]
-        
-        # Standardize continuous features
-        continuous_standardized = scaler.transform(input_full)
-        
-        # Get standardized values
-        continuous_standardized_dict = {}
-        for col in continuous_features_in_model:
+        cont_std = scaler.transform(input_full)
+
+        cont_std_dict = {}
+        for col in continuous_feats:
             if col in scaler_features:
                 idx = scaler_features.index(col)
-                continuous_standardized_dict[col] = continuous_standardized[0, idx]
-        
-        # Combine standardized continuous features with categorical features
+                cont_std_dict[col] = cont_std[0, idx]
+
         final_input = []
         for col in model_features:
             if col in categorical_features:
                 final_input.append(input_df_for_model[col].values[0])
             else:
-                final_input.append(continuous_standardized_dict[col])
-        
-        input_standardized = np.array([final_input])
-        
-        # Clip inputs to training data range to avoid extrapolation
-        # This prevents the model from behaving unpredictably for out-of-distribution values
-        try:
-            # Map model features to training data features (handle Dyslipidemia/HighCholesterol mismatch)
-            train_features = []
-            for feat in model_features:
-                if feat == 'HighCholesterol' and 'Dyslipidemia' in df_train.columns:
-                    train_features.append('Dyslipidemia')
-                elif feat == 'Dyslipidemia' and 'HighCholesterol' in df_train.columns:
-                    train_features.append('HighCholesterol')
-                else:
-                    train_features.append(feat)
+                final_input.append(cont_std_dict[col])
+        input_std = np.array([final_input])
 
-            # Get training data for the specific model features
-            # Note: df_train has standardized values for continuous features and raw for categorical
-            train_subset = df_train[train_features]
-            
-            # Calculate min and max from training data (using percentiles to avoid outliers)
-            # Using 0.5th and 99.5th percentiles to be robust against outliers
-            train_min = train_subset.quantile(0.005).values
-            train_max = train_subset.quantile(0.995).values
-            
-            # Clip the input
-            input_standardized = np.clip(input_standardized, train_min, train_max)
-            print(f"Input clipped to training range (0.5-99.5 percentile) for stability.")
-        except Exception as e:
-            print(f"Warning: Could not clip input to training range: {e}")
+        # Clip to training range
+        bounds = clip_bounds.get(feat_set_key)
+        if bounds:
+            try:
+                col_indices = [model_features.index(c) if c in model_features
+                               else (model_features.index('Dyslipidemia') if c == 'HighCholesterol' and 'Dyslipidemia' in model_features
+                               else None)
+                               for c in bounds['cols']]
+                clip_min = np.zeros(len(model_features))
+                clip_max = np.ones(len(model_features)) * 999
+                for i, ci in enumerate(col_indices):
+                    if ci is not None:
+                        clip_min[ci] = bounds['min'][i]
+                        clip_max[ci] = bounds['max'][i]
+                input_std = np.clip(input_std, clip_min, clip_max)
+            except Exception:
+                pass
 
-        # Make prediction
-        prediction = float(predict_fn(input_standardized)[0])
-        
-        # Determine Risk Level (binary stratification)
-        model_key = 'all_cause' if model_type == 'all_cause' else 'cardio'
-        high_thresh = thresholds[model_key]['high']
+        # Predict
+        prediction = float(predict_fn(input_std)[0])
 
+        # Risk level
+        high_thresh = thresholds[feat_set_key]['high']
         if prediction >= high_thresh:
             risk_level = "High Risk"
             risk_color = "red"
@@ -374,69 +306,51 @@ def predict():
             risk_color = "green"
             risk_desc = f"Below the 10-year IPCW Youden cutoff ({high_thresh:.2%})"
 
-        # Generate prediction label
-        if model_type == 'all_cause':
-            prediction_label = f"10-Year All-Cause Mortality Risk: {prediction:.2%}"
-            prediction_note = (f"Risk Level: {risk_level}. "
-                               f"High Risk is defined as predicted 10-year risk ≥ {high_thresh:.2%}, "
-                               "derived from the 10-year IPCW time-dependent ROC Youden index. "
-                               "Risk is calculated as 1 − S(120 months).")
-        else:
-            prediction_label = f"10-Year Cardiovascular Mortality Risk: {prediction:.2%}"
-            prediction_note = (f"Risk Level: {risk_level}. "
-                               f"High Risk is defined as predicted 10-year risk ≥ {high_thresh:.2%}, "
-                               "derived from the 10-year IPCW time-dependent ROC Youden index. "
-                               "Risk is calculated as 1 − S(120 months).")
-        
-        # Calculate SHAP values (minimal nsamples for Render 512MB limit)
-        shap_values = explainer.shap_values(input_standardized, nsamples=200, silent=True)
-        
-        # Handle list output from explainer
-        if isinstance(shap_values, list):
-            shap_values = shap_values[1] if len(shap_values) == 2 else shap_values[0]
-        
-        # Get base value
-        base_value = explainer.expected_value
-        if isinstance(base_value, (list, np.ndarray)):
-            if len(base_value) > 1:
-                base_value = base_value[1] if len(base_value) == 2 else base_value[0]
-            else:
-                base_value = base_value[0]
-        base_value = float(base_value)
-        
-        # Create display names
+        label_prefix = "10-Year All-Cause" if model_type == 'all_cause' else "10-Year Cardiovascular"
+        prediction_label = f"{label_prefix} Mortality Risk: {prediction:.2%}"
+        prediction_note = (
+            f"Risk Level: {risk_level}. "
+            f"High Risk ≥ {high_thresh:.2%} (10-year IPCW time-dependent ROC Youden index). "
+            f"Risk = 1 − S(120 months)."
+        )
+
+        # SHAP
+        shap_raw = explainer.shap_values(input_std, nsamples=150, silent=True)
+        if isinstance(shap_raw, list):
+            shap_raw = shap_raw[1] if len(shap_raw) == 2 else shap_raw[0]
+
+        base_val = explainer.expected_value
+        if isinstance(base_val, (list, np.ndarray)):
+            base_val = base_val[1] if len(base_val) > 1 else base_val[0]
+        base_val = float(base_val)
+
         display_names = [feature_mapping.get(f, f) for f in features]
-        
-        # Create SHAP explanation object
-        shap_explanation = shap.Explanation(
-            values=shap_values[0],
-            base_values=base_value,
+
+        shap_exp = shap.Explanation(
+            values=shap_raw[0],
+            base_values=base_val,
             data=input_df_original.values[0],
             feature_names=display_names
         )
-        
-        # Generate waterfall plot
-        shap.plots.waterfall(shap_explanation, show=False, max_display=15)
-        
-        # Convert to base64 image
-        buffer = BytesIO()
-        plt.savefig(buffer, format='png', dpi=150, bbox_inches='tight')
-        buffer.seek(0)
-        image_base64 = base64.b64encode(buffer.read()).decode()
-        plt.close()
-        
-        # Prepare SHAP contributions for display
-        shap_contributions = []
-        for i, feat in enumerate(features):
-            shap_contributions.append({
-                'feature': feature_mapping.get(feat, feat),
-                'value': float(input_df_original.iloc[0, i]),
-                'shap_value': float(shap_values[0][i])
-            })
-        
-        # Sort by absolute SHAP value
-        shap_contributions.sort(key=lambda x: abs(x['shap_value']), reverse=True)
-        
+
+        # Waterfall plot (low-res to save memory)
+        shap.plots.waterfall(shap_exp, show=False, max_display=10)
+        buf = BytesIO()
+        plt.savefig(buf, format='png', dpi=100, bbox_inches='tight')
+        buf.seek(0)
+        img_b64 = base64.b64encode(buf.read()).decode()
+        plt.close('all')
+        buf.close()
+
+        # SHAP contributions
+        shap_contribs = sorted(
+            [{'feature': display_names[i],
+              'value': float(input_df_original.iloc[0, i]),
+              'shap_value': float(shap_raw[0][i])}
+             for i in range(len(features))],
+            key=lambda x: abs(x['shap_value']), reverse=True
+        )
+
         return jsonify({
             'success': True,
             'prediction': prediction,
@@ -447,29 +361,24 @@ def predict():
             'risk_desc': risk_desc,
             'threshold_used': high_thresh,
             'threshold_method': '10-year IPCW time-dependent ROC Youden index',
-            'base_value': base_value,
-            'shap_plot': image_base64,
-            'shap_contributions': shap_contributions
+            'base_value': base_val,
+            'shap_plot': img_b64,
+            'shap_contributions': shap_contribs
         })
-        
+
     except Exception as e:
         import traceback
         traceback.print_exc()
-        return jsonify({
-            'success': False,
-            'error': str(e)
-        })
+        return jsonify({'success': False, 'error': str(e)})
+
 
 if __name__ == '__main__':
-    print("\n" + "="*70)
-    print("Starting Web Calculator Application")
-    print("="*70)
-    print("\nFeature Encoding:")
-    print("  - Dyslipidemia: 1 = Yes (have dyslipidemia), 2 = No (no dyslipidemia)")
-    print("  - Sex (Gender): 1 = Male, 2 = Female")
-    print("  - Smoking: 0 = Never, 1 = Former, 2 = Current")
-    print("\nServer starting on http://0.0.0.0:5001")
-    print("="*70 + "\n")
+    print("\n" + "=" * 70)
+    print("Feature Encoding:")
+    print("  Dyslipidemia: 1=Yes, 2=No | Sex: 1=Male, 2=Female")
+    print("  Smoking: 0=Never, 1=Former, 2=Current")
+    print("Server: http://0.0.0.0:" + str(os.environ.get('PORT', 5001)))
+    print("=" * 70 + "\n")
     port = int(os.environ.get('PORT', 5001))
     debug_mode = os.environ.get('FLASK_DEBUG', 'True').lower() == 'true'
     app.run(debug=debug_mode, host='0.0.0.0', port=port)
